@@ -16,9 +16,10 @@ The Ruby SDK at `/opt/ruby/bsv-ruby-sdk` is a sibling implementation, useful as 
 
 **Technology decisions:**
 - Swift Package (not framework/Xcode project)
+- **Zero external dependencies** — pure Swift + Apple system frameworks only
 - CryptoKit — hashing (SHA-256, SHA-512, SHA-1), HMAC, AES-GCM
-- secp256k1.swift (21-DOT-DEV) — ECDSA, Schnorr, ECDH, key recovery, tweaking (same approach as py-sdk using coincurve)
-- RIPEMD-160 — small vendored implementation or lightweight package
+- secp256k1 — pure Swift implementation (same approach as ts-sdk and go-sdk; NOT wrapping a C library)
+- RIPEMD-160 — vendored pure-Swift implementation
 - CommonCrypto — PBKDF2, AES-CBC (for ECIES compatibility)
 
 **Architecture:** Declarative SDK (what things *are*) — the wallet app is the imperative layer (what to *do*). This matches the ts-sdk's design: primitives → script → transaction → wallet.
@@ -48,12 +49,7 @@ bsv-sdk/
             └── Vectors/          ← JSON vectors from go-sdk/ts-sdk
 ```
 
-**Dependencies (Package.swift):**
-```swift
-.package(url: "https://github.com/21-DOT-DEV/swift-secp256k1.git", from: "0.23.0")
-```
-
-Plus a RIPEMD-160 implementation (evaluate vendoring ~150 lines vs a package).
+**Dependencies (Package.swift):** None. Pure Swift + Apple system frameworks (CryptoKit, CommonCrypto).
 
 ---
 
@@ -78,22 +74,24 @@ No secp256k1 dependency. Testable immediately with known vectors.
 
 ## Phase 2: Keys and Signatures (#3)
 
-Core key management. Wraps secp256k1.swift.
+Pure-Swift secp256k1 implementation + key management. Zero external dependencies.
 
 | Type | File | Notes |
 |------|------|-------|
-| `PrivateKey` | `Primitives/PrivateKey.swift` | Generate, fromBytes/Hex/WIF, sign. Wraps `P256K.Signing.PrivateKey` |
-| `PublicKey` | `Primitives/PublicKey.swift` | Derive from private, compressed/uncompressed, hash160, address |
+| `Field` | `Primitives/Field.swift` | Modular arithmetic over secp256k1 prime field (~1,300 lines in go-sdk) |
+| `Point` | `Primitives/Point.swift` | Elliptic curve point operations: add, double, scalar multiply |
+| `Curve` | `Primitives/Curve.swift` | secp256k1 constants: p, N, G, HALF_N |
+| `ECDSA` | `Primitives/ECDSA.swift` | RFC 6979 deterministic signing, verify, recover |
+| `Schnorr` | `Primitives/Schnorr.swift` | Schnorr signature scheme |
 | `Signature` | `Primitives/Signature.swift` | DER serialise/parse, low-S normalisation, r/s as Data |
-| `Curve` | `Primitives/Curve.swift` | Constants only: N, HALF_N, G |
+| `PrivateKey` | `Primitives/PrivateKey.swift` | Generate, fromBytes/Hex/WIF, sign, ECDH |
+| `PublicKey` | `Primitives/PublicKey.swift` | Derive from private, compressed/uncompressed, hash160, address |
 
-**Reference:** ts-sdk `src/primitives/PrivateKey.ts`, `PublicKey.ts`, `Signature.ts`; go-sdk `primitives/ec/`; py-sdk `keys.py`
+**Reference:** go-sdk `primitives/ec/` (field.go, ec.go ~2,300 lines), ts-sdk `src/primitives/` (BigNumber.ts, Point.ts, Curve.ts, ECDSA.ts)
 
-**What secp256k1.swift handles for us:** RFC 6979 nonces, raw ECDSA math, Schnorr sign/verify, key recovery. (Same delegation model as py-sdk's use of coincurve.)
+**What we implement (everything):** Field arithmetic (mod p), point arithmetic, ECDSA with RFC 6979, Schnorr, key recovery, ECDH, DER encoding (BIP-66), WIF encode/decode, address generation.
 
-**What we implement:** DER encoding/decoding (BIP-66 strict), WIF encode/decode (Base58Check), address generation (Hash160 + Base58Check), low-S check.
-
-**Verify:** Use BRC-42 test vectors from go-sdk (`primitives/ec/testdata/BRC42.*.vectors.json`). Cross-check key derivation and addresses against all three reference SDKs.
+**Verify:** BRC-42 test vectors from go-sdk (`primitives/ec/testdata/BRC42.*.vectors.json`). ECDSA test vectors. Cross-check key derivation and addresses against all three reference SDKs.
 
 ---
 

@@ -73,16 +73,18 @@ A script being parseable but failing execution is not a bug — it's the distinc
 
 ## Cryptography
 
-- **CryptoKit** — SHA-256, SHA-512, SHA-1, HMAC-SHA256/512, AES-GCM (Apple system framework)
-- **secp256k1.swift** (21-DOT-DEV) — ECDSA, Schnorr, ECDH, key recovery, key tweaking (wraps bitcoin-core/secp256k1)
-- **CommonCrypto** — PBKDF2, AES-CBC for ECIES (Apple system framework)
-- **RIPEMD-160** — vendored implementation or lightweight package (not in CryptoKit)
+**Zero external dependencies.** All crypto is implemented in pure Swift, following the same approach as the ts-sdk (pure TypeScript) and go-sdk (pure Go). The py-sdk's approach of wrapping libsecp256k1 via coincurve was considered and rejected — we control our own crypto stack.
 
-Items needing custom implementation: DER signature encoding (BIP-66), Base58Check, BIP-32/39, WIF encoding, address generation.
+- **CryptoKit** — SHA-256, SHA-512, SHA-1, HMAC-SHA256/512, AES-GCM (Apple system framework)
+- **CommonCrypto** — PBKDF2, AES-CBC for ECIES (Apple system framework)
+- **RIPEMD-160** — vendored pure-Swift implementation
+- **secp256k1** — pure-Swift implementation: field arithmetic, point operations, ECDSA (RFC 6979), Schnorr, ECDH, key recovery. Reference: go-sdk `primitives/ec/` and ts-sdk `src/primitives/`
+
+Items needing custom implementation: secp256k1 field/point arithmetic, ECDSA sign/verify/recover, Schnorr signatures, DER signature encoding (BIP-66), Base58Check, BIP-32/39, WIF encoding, address generation.
 
 ## Conventions
 
 - Use `Data` for binary buffers throughout (not `[UInt8]`)
 - XCTest for all tests
 - Test vectors shared across SDKs (JSON files from go-sdk `script/interpreter/data/` and `primitives/ec/testdata/`)
-- No external dependencies beyond secp256k1.swift and RIPEMD-160
+- No external dependencies — pure Swift + Apple system frameworks only
