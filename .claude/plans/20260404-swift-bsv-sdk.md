@@ -1,5 +1,8 @@
 # Swift BSV SDK — Implementation Plan
 
+**Issue**: #1
+**Project**: https://github.com/users/sgbett/projects/3
+
 ## Context
 
 We're building a Swift BSV SDK at `/opt/xcode/bsv-sdk` to support development of a native macOS wallet application. The SDK joins the official BSV SDK family alongside [ts-sdk](https://github.com/bsv-blockchain/ts-sdk), [go-sdk](https://github.com/bsv-blockchain/go-sdk), and [py-sdk](https://github.com/bsv-blockchain/py-sdk).
@@ -54,7 +57,7 @@ Plus a RIPEMD-160 implementation (evaluate vendoring ~150 lines vs a package).
 
 ---
 
-## Phase 1: Foundation (Hashing + Encoding)
+## Phase 1: Foundation (Hashing + Encoding) (#2)
 
 No secp256k1 dependency. Testable immediately with known vectors.
 
@@ -73,7 +76,7 @@ No secp256k1 dependency. Testable immediately with known vectors.
 
 ---
 
-## Phase 2: Keys and Signatures
+## Phase 2: Keys and Signatures (#3)
 
 Core key management. Wraps secp256k1.swift.
 
@@ -94,7 +97,7 @@ Core key management. Wraps secp256k1.swift.
 
 ---
 
-## Phase 3: Script Layer
+## Phase 3: Script Layer (#4)
 
 Parse, construct, and classify Bitcoin scripts.
 
@@ -113,7 +116,7 @@ Parse, construct, and classify Bitcoin scripts.
 
 ---
 
-## Phase 4: Transactions (Critical Path Complete)
+## Phase 4: Transactions (Critical Path Complete) (#5)
 
 Build, sign, serialise P2PKH transactions. **This plus Phases 1–3 enables the wallet app.**
 
@@ -133,7 +136,7 @@ Build, sign, serialise P2PKH transactions. **This plus Phases 1–3 enables the 
 
 ---
 
-## Phase 5: Network + BEEF
+## Phase 5: Network + BEEF (#6)
 
 Broadcast transactions, support BEEF/EF formats for ARC.
 
@@ -152,7 +155,7 @@ Broadcast transactions, support BEEF/EF formats for ARC.
 
 ---
 
-## Phase 6: Extended Primitives
+## Phase 6: Extended Primitives (#7)
 
 HD keys, mnemonics, encryption, message signing. Needed for wallet key management.
 
@@ -174,7 +177,7 @@ HD keys, mnemonics, encryption, message signing. Needed for wallet key managemen
 
 ---
 
-## Phase 7: Script Interpreter
+## Phase 7: Script Interpreter (#8)
 
 Full stack-based execution engine for SPV verification.
 
@@ -191,7 +194,7 @@ Full stack-based execution engine for SPV verification.
 
 ---
 
-## Phase 8: Wallet, Auth, Overlay (Future)
+## Phase 8: Wallet, Auth, Overlay (Future) (#9)
 
 Deferred until core SDK is stable.
 
@@ -248,3 +251,57 @@ Shared JSON vectors to copy into `Tests/BSVTests/Conformance/Vectors/`:
 - `keys.py`, `hash.py`, `curve.py`
 - `script/script.py`, `script/spend.py`
 - `transaction.py`
+
+---
+
+## Issue Hierarchy
+
+- #1 [HLR] Swift BSV SDK
+  - #2 [Phase 1] Foundation (Hashing + Encoding)
+    - #10 [Task 1.1] Digest (hashing functions)
+    - #11 [Task 1.2] Base58 encoding
+    - #12 [Task 1.3] VarInt encoding
+    - #13 [Task 1.4] Data+Hex extension
+    - #14 [Task 1.5] Phase 1 conformance tests
+  - #3 [Phase 2] Keys and Signatures
+    - #15 [Task 2.1] PrivateKey
+    - #16 [Task 2.2] PublicKey
+    - #17 [Task 2.3] Signature and DER encoding
+    - #18 [Task 2.4] Curve constants
+    - #19 [Task 2.5] Phase 2 conformance tests
+  - #4 [Phase 3] Script Layer
+    - #20 [Task 3.1] Opcodes
+    - #21 [Task 3.2] ScriptChunk
+    - #22 [Task 3.3] Script
+    - #23 [Task 3.4] ScriptBuilder
+    - #24 [Task 3.5] Phase 3 tests
+  - #5 [Phase 4] Transactions (Critical Path Complete)
+    - #25 [Task 4.1] TransactionInput and TransactionOutput
+    - #26 [Task 4.2] Sighash
+    - #27 [Task 4.3] Transaction
+    - #28 [Task 4.4] P2PKH template
+    - #29 [Task 4.5] FeeModel
+    - #30 [Task 4.6] Phase 4 conformance tests
+  - #6 [Phase 5] Network + BEEF
+    - #31 [Task 5.1] MerklePath
+    - #32 [Task 5.2] BEEF serialisation
+    - #33 [Task 5.3] ARC broadcaster
+    - #34 [Task 5.4] ChainTracker protocol and WhatsOnChain
+    - #35 [Task 5.5] Phase 5 tests
+  - #7 [Phase 6] Extended Primitives
+    - #36 [Task 6.1] ExtendedKey (BIP-32)
+    - #37 [Task 6.2] Mnemonic (BIP-39)
+    - #38 [Task 6.3] ECIES encryption
+    - #39 [Task 6.4] Bitcoin Signed Messages (BSM)
+    - #40 [Task 6.5] SymmetricKey and message types
+    - #41 [Task 6.6] Phase 6 conformance tests
+  - #8 [Phase 7] Script Interpreter
+    - #42 [Task 7.1] ScriptStack and ScriptNumber
+    - #43 [Task 7.2] Interpreter core
+    - #44 [Task 7.3] Operation modules
+    - #45 [Task 7.4] Phase 7 conformance tests
+  - #9 [Phase 8] Wallet, Auth, Overlay (Future)
+    - #46 [Task 8.1] Wallet orchestration
+    - #47 [Task 8.2] Auth (BRC-66/104)
+    - #48 [Task 8.3] Overlay (SHIP/SLAP)
+    - #49 [Task 8.4] Shamir secret sharing
