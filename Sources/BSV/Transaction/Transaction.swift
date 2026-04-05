@@ -132,4 +132,75 @@ public class Transaction {
         }
         return try fromBinary(data)
     }
+
+    // MARK: - Building
+
+    /// Add an input from a UTXO, with an unlocking script template for signing.
+    public func addInput(
+        sourceTXID: Data,
+        sourceOutputIndex: UInt32,
+        sourceSatoshis: UInt64,
+        sourceLockingScript: Script,
+        unlockingScriptTemplate: (any UnlockingScriptTemplate)? = nil,
+        sequenceNumber: UInt32 = defaultSequenceNumber
+    ) {
+        var input = TransactionInput(
+            sourceTXID: sourceTXID,
+            sourceOutputIndex: sourceOutputIndex,
+            sequenceNumber: sequenceNumber
+        )
+        input.sourceSatoshis = sourceSatoshis
+        input.sourceLockingScript = sourceLockingScript
+        input.unlockingScriptTemplate = unlockingScriptTemplate
+        inputs.append(input)
+    }
+
+    /// Add an output.
+    public func addOutput(satoshis: UInt64, lockingScript: Script, isChange: Bool = false) {
+        outputs.append(TransactionOutput(
+            satoshis: satoshis,
+            lockingScript: lockingScript,
+            isChange: isChange
+        ))
+    }
+
+    // MARK: - Signing
+
+    /// Sign all inputs that have an unlocking script template attached.
+    /// Each template's `sign(tx:inputIndex:)` is called to produce
+    /// the unlocking script.
+    public func sign() throws {
+        for i in 0..<inputs.count {
+            guard let template = inputs[i].unlockingScriptTemplate else {
+                continue
+            }
+            inputs[i].unlockingScript = try template.sign(tx: self, inputIndex: i)
+        }
+    }
+
+    // MARK: - Fee Estimation
+
+    /// Estimated size of the transaction in bytes, using template
+    /// estimated lengths for unsigned inputs.
+    public func estimatedSize() -> Int {
+        var size = 4 // version
+        size += VarInt.encode(UInt64(inputs.count)).count
+        for input in inputs {
+            // txid + vout + sequence = 40 bytes
+            size += 40
+            if let template = input.unlockingScriptTemplate {
+                let scriptLen = template.estimateLength(tx: self, inputIndex: 0)
+                size += VarInt.encode(UInt64(scriptLen)).count + scriptLen
+            } else {
+                let scriptLen = input.unlockingScript.data.count
+                size += VarInt.encode(UInt64(scriptLen)).count + scriptLen
+            }
+        }
+        size += VarInt.encode(UInt64(outputs.count)).count
+        for output in outputs {
+            size += output.toBinary().count
+        }
+        size += 4 // lockTime
+        return size
+    }
 }
