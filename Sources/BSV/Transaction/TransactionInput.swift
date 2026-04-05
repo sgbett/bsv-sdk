@@ -30,6 +30,8 @@ public struct TransactionInput {
     public var sourceSatoshis: UInt64?
     /// Optional locking script of the output being spent (for sighash when sourceTransaction is nil).
     public var sourceLockingScript: Script?
+    /// Template used to produce the unlocking script during signing.
+    public var unlockingScriptTemplate: (any UnlockingScriptTemplate)?
 
     public init(
         sourceTXID: Data = Data(count: 32),
