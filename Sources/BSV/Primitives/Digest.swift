@@ -37,14 +37,14 @@ public enum Digest {
 
     /// HMAC-SHA256.
     public static func hmacSha256(data: Data, key: Data) -> Data {
-        let hmacKey = SymmetricKey(data: key)
+        let hmacKey = CryptoKit.SymmetricKey(data: key)
         let mac = HMAC<SHA256>.authenticationCode(for: data, using: hmacKey)
         return Data(mac)
     }
 
     /// HMAC-SHA512.
     public static func hmacSha512(data: Data, key: Data) -> Data {
-        let hmacKey = SymmetricKey(data: key)
+        let hmacKey = CryptoKit.SymmetricKey(data: key)
         let mac = HMAC<SHA512>.authenticationCode(for: data, using: hmacKey)
         return Data(mac)
     }
