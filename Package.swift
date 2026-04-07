@@ -19,7 +19,10 @@ let package = Package(
         .testTarget(
             name: "BSVTests",
             dependencies: ["BSV"],
-            path: "Tests/BSVTests"
+            path: "Tests/BSVTests",
+            resources: [
+                .copy("Conformance/Vectors")
+            ]
         )
     ]
 )
