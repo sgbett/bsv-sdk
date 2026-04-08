@@ -18,18 +18,25 @@ final class TxInvalidConformanceTests: XCTestCase {
 
         var passed = 0
         let failed = 0
-        var skipped = 0
+        var skipParse = 0
+        var skipFlags = 0
+        var skipP2SH = 0
+        var skipAttach = 0
+        var skipPolicyAccepted = 0
         var firstFailures: [String] = []
 
         for vec in vectors {
             guard let parsed = TxVectorLoader.parse(vec) else {
-                skipped += 1
+                skipParse += 1
                 continue
             }
 
-            if TxVectorLoader.shouldSkip(flags: parsed.flags)
-                || TxVectorLoader.containsP2SH(parsed.prevouts) {
-                skipped += 1
+            if TxVectorLoader.shouldSkip(flags: parsed.flags) {
+                skipFlags += 1
+                continue
+            }
+            if TxVectorLoader.containsP2SH(parsed.prevouts) {
+                skipP2SH += 1
                 continue
             }
 
@@ -47,7 +54,7 @@ final class TxInvalidConformanceTests: XCTestCase {
             // Attach prevouts — if any prevout is unrepresentable, we can't
             // evaluate and must skip rather than silently pass.
             guard TxVectorLoader.attachPrevouts(to: tx, prevouts: parsed.prevouts) else {
-                skipped += 1
+                skipAttach += 1
                 continue
             }
 
@@ -73,14 +80,16 @@ final class TxInvalidConformanceTests: XCTestCase {
                 // invalid vector. These are policy-flag edge cases we do not
                 // enforce in post-genesis mode; record but do not hard-fail
                 // the suite.
-                skipped += 1
+                skipPolicyAccepted += 1
                 if firstFailures.count < 10 {
                     firstFailures.append("invalid tx unexpectedly verified: flags=\(parsed.flags) txhex=\(parsed.rawTxHex.prefix(60))...")
                 }
             }
         }
 
-        print("TxInvalid vectors: passed=\(passed) failed=\(failed) skipped=\(skipped)")
+        let skipped = skipParse + skipFlags + skipP2SH + skipAttach + skipPolicyAccepted
+        print("TxInvalid vectors: passed=\(passed) failed=\(failed) skipped=\(skipped) "
+            + "(parse=\(skipParse) flags=\(skipFlags) p2sh=\(skipP2SH) attach=\(skipAttach) policyAccepted=\(skipPolicyAccepted))")
         if !firstFailures.isEmpty {
             print("TxInvalid first mismatches:")
             for line in firstFailures { print("  \(line)") }

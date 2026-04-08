@@ -21,20 +21,27 @@ final class TxValidConformanceTests: XCTestCase {
 
         var passed = 0
         var failed = 0
-        var skipped = 0
+        var skipParse = 0
+        var skipFlags = 0
+        var skipP2SH = 0
+        var skipDecode = 0
+        var skipAttach = 0
         var legacyRejected = 0
         var firstFailures: [String] = []
 
         for vec in vectors {
             guard let parsed = TxVectorLoader.parse(vec) else {
-                skipped += 1
+                skipParse += 1
                 continue
             }
 
             // Skip vectors that rely on features BSV does not implement.
-            if TxVectorLoader.shouldSkip(flags: parsed.flags)
-                || TxVectorLoader.containsP2SH(parsed.prevouts) {
-                skipped += 1
+            if TxVectorLoader.shouldSkip(flags: parsed.flags) {
+                skipFlags += 1
+                continue
+            }
+            if TxVectorLoader.containsP2SH(parsed.prevouts) {
+                skipP2SH += 1
                 continue
             }
 
@@ -44,13 +51,13 @@ final class TxValidConformanceTests: XCTestCase {
                 let txData = Data(hex: parsed.rawTxHex) ?? Data()
                 tx = try Transaction.fromBinary(txData)
             } catch {
-                skipped += 1
+                skipDecode += 1
                 continue
             }
 
             // Attach prevouts to each input.
             guard TxVectorLoader.attachPrevouts(to: tx, prevouts: parsed.prevouts) else {
-                skipped += 1
+                skipAttach += 1
                 continue
             }
 
@@ -85,7 +92,9 @@ final class TxValidConformanceTests: XCTestCase {
             }
         }
 
-        print("TxValid vectors: passed=\(passed) failed=\(failed) skipped=\(skipped) legacyRejected=\(legacyRejected)")
+        let skipped = skipParse + skipFlags + skipP2SH + skipDecode + skipAttach
+        print("TxValid vectors: passed=\(passed) failed=\(failed) legacyRejected=\(legacyRejected) skipped=\(skipped) "
+            + "(parse=\(skipParse) flags=\(skipFlags) p2sh=\(skipP2SH) decode=\(skipDecode) attach=\(skipAttach))")
         if !firstFailures.isEmpty {
             print("TxValid legacy-rejected samples:")
             for line in firstFailures { print("  \(line)") }
