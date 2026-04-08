@@ -40,10 +40,18 @@ public final class Interpreter {
 
     // MARK: - Execution state
 
+    /// A single entry on the conditional execution stack.
+    /// `active` is the current branch truth value; `elseSeen` enforces the
+    /// post-genesis rule that only one `OP_ELSE` is permitted per `OP_IF`.
+    struct IfFrame {
+        var active: Bool
+        var elseSeen: Bool
+    }
+
     var stack = ScriptStack()
     var programCounter = 0
     var lastCodeSeparator = 0
-    var ifStack: [Bool] = []
+    var ifStack: [IfFrame] = []
     var opCount = 0
     /// True while executing the unlocking script, false for locking script.
     var inUnlocking = true
@@ -155,7 +163,7 @@ public final class Interpreter {
             let chunk = chunks[programCounter]
             let op = chunk.opcode
 
-            let executing = !ifStack.contains(false)
+            let executing = !ifStack.contains(where: { !$0.active })
 
             // Data pushes.
             if op >= 0 && op <= OpCodes.OP_PUSHDATA4 {

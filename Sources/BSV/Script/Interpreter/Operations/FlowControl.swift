@@ -8,20 +8,27 @@ extension Interpreter {
     /// Dispatch OP_IF / OP_NOTIF: push branch condition onto ifStack.
     func opIf(opcode: UInt8) throws {
         var value = false
-        if !ifStack.contains(false) {
+        if !ifStack.contains(where: { !$0.active }) {
             let top = try stack.pop()
             value = ScriptNumber.castToBool(top)
             if opcode == OpCodes.OP_NOTIF { value = !value }
         }
-        ifStack.append(value)
+        ifStack.append(IfFrame(active: value, elseSeen: false))
     }
 
-    /// Dispatch OP_ELSE: flip the top ifStack entry.
+    /// Dispatch OP_ELSE: flip the top ifStack entry. Post-genesis only a
+    /// single OP_ELSE is permitted per OP_IF; a second ELSE is an unbalanced
+    /// conditional error.
     func opElse() throws {
         guard !ifStack.isEmpty else {
             throw ScriptError.unbalancedConditional("OP_ELSE without OP_IF")
         }
-        ifStack[ifStack.count - 1] = !ifStack[ifStack.count - 1]
+        let idx = ifStack.count - 1
+        if ifStack[idx].elseSeen {
+            throw ScriptError.unbalancedConditional("OP_ELSE after OP_ELSE")
+        }
+        ifStack[idx].active = !ifStack[idx].active
+        ifStack[idx].elseSeen = true
     }
 
     /// Dispatch OP_ENDIF: pop the top ifStack entry.
