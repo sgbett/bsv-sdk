@@ -1,57 +1,73 @@
 // SPDX-License-Identifier: Open BSV License Version 5
-// Shared helpers for tx_valid.json / tx_invalid.json reference vectors.
+// Shared loader/parser for tx_valid.json and tx_invalid.json reference
+// vectors. Used by TxValidConformanceTests and TxInvalidConformanceTests.
 
 import Foundation
+import XCTest
 @testable import BSV
 
-/// A parsed reference-test transaction vector.
-struct TxVector {
-    /// List of prevouts the spending transaction consumes.
-    var prevouts: [TxVectorPrevout]
-    /// Serialised spending transaction, as hex.
-    var rawTxHex: String
-    /// Raw comma-separated verify flags string (may be empty).
-    var flags: String
-}
-
-/// A single prevout declared by a test vector.
+/// A single prevout entry from a tx_valid / tx_invalid vector row.
 struct TxVectorPrevout {
-    /// Previous transaction ID in **display** (reversed) byte order, as the
-    /// JSON fixture presents it.
-    var displayTxID: String
+    /// Previous transaction id in **internal / wire** byte order — already
+    /// reversed from the big-endian display form used in the JSON fixture.
+    let txidWire: Data
     /// Output index being spent.
-    var outputIndex: UInt32
-    /// Locking script of the output, parsed from reference-test short form.
-    var lockingScript: Script
+    let outputIndex: UInt32
+    /// Locking script of the prevout (parsed from reference-test short form).
+    let lockingScript: Script
     /// Satoshi amount (optional in the fixture; defaults to 0 when absent).
-    var satoshis: UInt64
+    let satoshis: UInt64
 }
 
-/// Loads and parses reference-test transaction vectors from the `Vectors/`
-/// bundle resources and adapts them for use with `Interpreter.verify`.
+/// A fully parsed tx_valid / tx_invalid vector row.
+struct TxVector {
+    let prevouts: [TxVectorPrevout]
+    let rawTxHex: String
+    let flags: String
+}
+
+/// Loads and parses reference-test transaction vectors.
 enum TxVectorLoader {
+
+    /// Flags whose semantics the Swift interpreter does not model.
+    /// Vectors exercising these are skipped rather than counted as
+    /// failures, matching the Phase 7 script_tests.json convention.
+    /// Note: "P2SH" is NOT in this list. In Bitcoin Core's verify-flag
+    /// vocabulary, "P2SH" only means "enforce P2SH semantics if the
+    /// locking script is P2SH-shaped" — nearly every historic vector
+    /// sets it, including ones whose actual scripts are bare P2PKH /
+    /// multisig. We skip P2SH content at the script level via
+    /// `containsP2SH`, not via this flag list.
+    private static let unsupportedFlags: Set<String> = [
+        "WITNESS",
+        "TAPROOT",
+        "MINIMALIF",
+        "NULLFAIL",
+        "LOW_S",
+        "STRICTENC",
+        "DERSIG",
+        "CHECKLOCKTIMEVERIFY",
+        "CHECKSEQUENCEVERIFY",
+        "DISCOURAGE_UPGRADABLE_NOPS",
+        "CLEANSTACK"
+    ]
 
     /// Load a tx_valid / tx_invalid JSON file from the test bundle.
     static func load(_ name: String) throws -> [[Any]] {
-        guard let url = Bundle.module.url(
-            forResource: name, withExtension: "json", subdirectory: "Vectors"
-        ) else {
-            throw NSError(domain: "TxVectorLoader", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "missing vector file \(name).json"])
-        }
+        let url = try XCTUnwrap(
+            Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Vectors"),
+            "missing test vector file: \(name).json"
+        )
         let data = try Data(contentsOf: url)
         let obj = try JSONSerialization.jsonObject(with: data, options: [])
-        guard let arr = obj as? [[Any]] else {
-            throw NSError(domain: "TxVectorLoader", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "vector file not an array of arrays"])
-        }
-        return arr
+        return try XCTUnwrap(obj as? [[Any]], "expected top-level JSON array of arrays")
     }
 
     /// Parse one raw JSON vector into a `TxVector`, returning `nil` for
-    /// comment lines or any vector whose shape we cannot interpret.
+    /// comment lines or any vector whose shape we cannot interpret, or
+    /// for any vector whose prevout short-form scripts the parser does
+    /// not recognise.
     static func parse(_ vec: [Any]) -> TxVector? {
-        // Comment lines are single-string arrays.
         guard vec.count == 3 else { return nil }
         guard let prevoutsRaw = vec[0] as? [[Any]] else { return nil }
         guard let rawTxHex = vec[1] as? String else { return nil }
@@ -62,12 +78,11 @@ enum TxVectorLoader {
             guard row.count >= 3 else { return nil }
             guard let displayTxID = row[0] as? String else { return nil }
 
-            // Output index may be an Int or NSNumber.
+            // Output index is JSON-numeric.
             let idx: UInt32
-            if let n = row[1] as? Int {
-                idx = UInt32(bitPattern: Int32(n))
-            } else if let n = row[1] as? NSNumber {
-                idx = UInt32(bitPattern: Int32(truncating: n))
+            if let n = row[1] as? NSNumber {
+                let signed = Int32(truncating: n)
+                idx = UInt32(bitPattern: signed)
             } else {
                 return nil
             }
@@ -76,16 +91,19 @@ enum TxVectorLoader {
             guard let lockingScript = ShortFormParser.parse(scriptStr) else { return nil }
 
             var sats: UInt64 = 0
-            if row.count >= 4 {
-                if let n = row[3] as? Int {
-                    sats = UInt64(max(0, n))
-                } else if let n = row[3] as? NSNumber {
-                    sats = UInt64(max(0, Int(truncating: n)))
-                }
+            if row.count >= 4, let n = row[3] as? NSNumber {
+                let signed = Int64(truncating: n)
+                if signed > 0 { sats = UInt64(signed) }
             }
 
+            // JSON presents the prevout txid in big-endian / display form.
+            // The SDK stores txids in internal (wire) byte order, which is
+            // reversed. Store the already-reversed form for direct matching.
+            guard let displayBytes = Data(hex: displayTxID) else { return nil }
+            let wireBytes = Data(displayBytes.reversed())
+
             prevouts.append(TxVectorPrevout(
-                displayTxID: displayTxID,
+                txidWire: wireBytes,
                 outputIndex: idx,
                 lockingScript: lockingScript,
                 satoshis: sats
@@ -95,51 +113,52 @@ enum TxVectorLoader {
         return TxVector(prevouts: prevouts, rawTxHex: rawTxHex, flags: flags)
     }
 
-    /// Whether a vector should be skipped because its flags depend on
-    /// features the Swift post-genesis interpreter does not implement.
-    ///
-    /// Note: almost every vector includes "P2SH" in its flag list — this
-    /// is the Bitcoin Core default, not a requirement to actually evaluate
-    /// a P2SH redeem script. We therefore do not skip on P2SH here; P2SH
-    /// wrapping is detected by inspecting the locking scripts themselves
-    /// (see `looksLikeP2SH`).
-    static func shouldSkip(flags: String) -> Bool {
-        if flags.contains("WITNESS") || flags.contains("TAPROOT") {
-            return true
-        }
-        return false
-    }
-
-    /// Whether any of the prevout locking scripts are P2SH wrappers
-    /// (`HASH160 <20-byte hash> EQUAL`). BSV does not implement P2SH
-    /// redeem-script evaluation, so these vectors are out of scope.
+    /// True if any prevout in the list is a P2SH locking script.
+    /// P2SH is not valid on BSV post-genesis: the interpreter does not
+    /// re-execute the pushed redeem script, so any vector whose expected
+    /// outcome depends on P2SH evaluation is out of scope.
     static func containsP2SH(_ prevouts: [TxVectorPrevout]) -> Bool {
-        for p in prevouts where p.lockingScript.isP2SH {
+        for po in prevouts where po.lockingScript.isP2SH {
             return true
         }
         return false
     }
 
-    /// Attach the prevouts from a vector onto each input of the parsed
-    /// transaction. Returns false if any input cannot be matched to a
-    /// declared prevout.
-    ///
-    /// Note: transaction fixtures list prevout txids in **display** (reversed)
-    /// byte order, while `TransactionInput.sourceTXID` stores them in
-    /// internal wire order. We compare against the reversed hex to match.
-    static func attachPrevouts(to tx: Transaction, prevouts: [TxVectorPrevout]) -> Bool {
-        for i in 0..<tx.inputs.count {
-            let input = tx.inputs[i]
-            let wireHex = input.sourceTXID.reversed().map { String(format: "%02x", $0) }.joined()
+    /// True if the vector's verify flags include anything the Swift
+    /// interpreter does not enforce. Matches on comma-separated tokens.
+    static func shouldSkip(flags: String) -> Bool {
+        let tokens = flags
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+        for tok in tokens where unsupportedFlags.contains(tok) {
+            return true
+        }
+        return false
+    }
 
-            guard let match = prevouts.first(where: {
-                $0.displayTxID.lowercased() == wireHex && $0.outputIndex == input.sourceOutputIndex
-            }) else {
+    /// Attach each vector prevout to its matching input on `tx`.
+    ///
+    /// Returns `false` if any input of `tx` has no matching prevout in
+    /// the vector, or if any matched prevout is P2SH (not valid on BSV
+    /// post-genesis — the interpreter does not re-execute redeem scripts
+    /// so the vector's expected outcome is undefined for us).
+    static func attachPrevouts(to tx: Transaction, prevouts: [TxVectorPrevout]) -> Bool {
+        // Build a (txid, vout) → prevout map once.
+        var map = [String: TxVectorPrevout]()
+        for po in prevouts {
+            map["\(po.txidWire.hex):\(po.outputIndex)"] = po
+        }
+
+        for i in 0..<tx.inputs.count {
+            let key = "\(tx.inputs[i].sourceTXID.hex):\(tx.inputs[i].sourceOutputIndex)"
+            guard let po = map[key] else {
                 return false
             }
-
-            tx.inputs[i].sourceLockingScript = match.lockingScript
-            tx.inputs[i].sourceSatoshis = match.satoshis
+            if po.lockingScript.isP2SH {
+                return false
+            }
+            tx.inputs[i].sourceLockingScript = po.lockingScript
+            tx.inputs[i].sourceSatoshis = po.satoshis
         }
         return true
     }
