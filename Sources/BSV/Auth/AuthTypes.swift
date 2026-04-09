@@ -80,11 +80,21 @@ public struct AuthMessage: Sendable, Equatable {
 ///
 /// Sessions are keyed by `sessionNonce` in `SessionManager` and additionally
 /// indexed by `peerIdentityKey` so that callers can look one up by either.
+///
+/// `peerIdentityKeyVerified` distinguishes a *claimed* peer identity (e.g.
+/// an unsigned `initialRequest` where the peer told us its key but we
+/// haven't checked anything) from a *verified* one (a signed message has
+/// been received that proves control of the claimed key). Only verified
+/// sessions are reachable via identity-key lookup; claimed-only sessions
+/// can only be found by `sessionNonce`, which prevents an attacker from
+/// seeding a session under a victim's identity and then hijacking a later
+/// `getAuthenticatedSession(identityKey:)` lookup.
 public struct PeerSession: Sendable, Equatable {
     public var isAuthenticated: Bool
     public var sessionNonce: String
     public var peerNonce: String?
     public var peerIdentityKey: PublicKey?
+    public var peerIdentityKeyVerified: Bool
     public var lastUpdate: Date
     public var certificatesRequired: Bool
     public var certificatesValidated: Bool
@@ -94,6 +104,7 @@ public struct PeerSession: Sendable, Equatable {
         sessionNonce: String,
         peerNonce: String? = nil,
         peerIdentityKey: PublicKey? = nil,
+        peerIdentityKeyVerified: Bool = false,
         lastUpdate: Date = Date(),
         certificatesRequired: Bool = false,
         certificatesValidated: Bool = true
@@ -102,6 +113,7 @@ public struct PeerSession: Sendable, Equatable {
         self.sessionNonce = sessionNonce
         self.peerNonce = peerNonce
         self.peerIdentityKey = peerIdentityKey
+        self.peerIdentityKeyVerified = peerIdentityKeyVerified
         self.lastUpdate = lastUpdate
         self.certificatesRequired = certificatesRequired
         self.certificatesValidated = certificatesValidated

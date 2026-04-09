@@ -215,6 +215,48 @@ final class PeerTests: XCTestCase {
         withExtendedLifetime(fixture.bob) {}
     }
 
+    // MARK: - Vuln 2: Unsigned initialRequest session injection
+
+    /// An attacker-controlled peer sends Alice an unsigned BRC-66
+    /// `initialRequest` claiming identity `victim`. Alice's responder
+    /// path creates a session whose `peerIdentityKey` is the claimed key
+    /// — but that claim is UNVERIFIED. A subsequent
+    /// `getAuthenticatedSession(identityKey: victim)` call must NOT
+    /// return the attacker-seeded session.
+    func testInitialRequestDoesNotEnableIdentityLookup() async throws {
+        let (aliceTransport, attackerTransport) = await makeConnectedTransports()
+
+        let aliceWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+        let alice = try await Peer(wallet: aliceWallet, transport: aliceTransport)
+
+        // Pick a victim identity entirely unrelated to either party.
+        let victimKey = PrivateKey.random()!
+        let victimIdentity = PublicKey.fromPrivateKey(victimKey)
+
+        // Attacker has their own wallet but crafts a raw initialRequest
+        // AuthMessage whose identityKey is the victim's public key.
+        let attackerWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+        let attackerInitialNonce = try await AuthNonce.create(wallet: attackerWallet)
+
+        let spoofed = AuthMessage(
+            messageType: .initialRequest,
+            identityKey: victimIdentity,
+            initialNonce: attackerInitialNonce
+        )
+        try await attackerTransport.send(spoofed)
+
+        // Drain in-flight actor work so Alice's processInitialRequest has
+        // completed.
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Identity lookup must not return the attacker-seeded session.
+        let byIdentity = await alice.sessionManager.getSession(victimIdentity.hex)
+        XCTAssertNil(
+            byIdentity,
+            "attacker-seeded session must not be reachable via identity-key lookup"
+        )
+    }
+
 }
 
 // MARK: - Certificate-response test fixture

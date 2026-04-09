@@ -168,10 +168,15 @@ public actor Peer {
         let sessionNonce = try await AuthNonce.create(wallet: wallet)
         let certsRequired = !certificatesToRequest.certifiers.isEmpty
 
+        // We're about to initiate a handshake. `peerIdentityKey` here is
+        // the caller-supplied expected key — not yet verified. Leave
+        // `peerIdentityKeyVerified = false` until `processInitialResponse`
+        // verifies the peer's signature.
         sessionManager.addSession(PeerSession(
             isAuthenticated: false,
             sessionNonce: sessionNonce,
             peerIdentityKey: identityKey,
+            peerIdentityKeyVerified: false,
             certificatesRequired: certsRequired,
             certificatesValidated: !certsRequired
         ))
@@ -246,11 +251,21 @@ public actor Peer {
 
         let sessionNonce = try await AuthNonce.create(wallet: wallet)
         let certsRequired = !certificatesToRequest.certifiers.isEmpty
+        // BRC-66 `initialRequest` carries no signature, so the peer's
+        // claimed `identityKey` is an unverified claim at this point. We
+        // store it so we know what key to expect on the first signed
+        // message, but mark `peerIdentityKeyVerified = false` so
+        // `SessionManager` will not index the session under that identity.
+        // Otherwise an attacker could seed a session claiming any
+        // identity key and then have a later
+        // `getAuthenticatedSession(identityKey:)` call pick it up. See
+        // the BRC-66 security note on Vuln 2.
         sessionManager.addSession(PeerSession(
             isAuthenticated: true,
             sessionNonce: sessionNonce,
             peerNonce: initialNonce,
             peerIdentityKey: message.identityKey,
+            peerIdentityKeyVerified: false,
             certificatesRequired: certsRequired,
             certificatesValidated: !certsRequired
         ))
@@ -331,6 +346,11 @@ public actor Peer {
 
         session.peerNonce = peerInitial
         session.peerIdentityKey = message.identityKey
+        // On the initiator path we have just verified the peer's
+        // signature over the session-nonce pair, which proves control of
+        // `message.identityKey`. Mark the identity as verified so
+        // `SessionManager` indexes the session for identity-key lookup.
+        session.peerIdentityKeyVerified = true
         session.isAuthenticated = true
         session.certificatesRequired = !certificatesToRequest.certifiers.isEmpty
         session.certificatesValidated = !session.certificatesRequired

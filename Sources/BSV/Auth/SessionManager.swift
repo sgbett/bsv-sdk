@@ -86,7 +86,15 @@ public final class SessionManager: @unchecked Sendable {
 
         sessionsByNonce[session.sessionNonce] = session
 
-        if let identity = session.peerIdentityKey?.hex.lowercased() {
+        // Only index a session under its peer identity once we have
+        // cryptographic evidence the peer controls that key. Sessions
+        // created from an unsigned `initialRequest` carry only a
+        // self-asserted identity claim, and must therefore not be
+        // reachable via identity-key lookup — otherwise a later
+        // `getSession(<victim identity>)` could return an attacker-seeded
+        // session. See BRC-66 security note on Vuln 2.
+        if session.peerIdentityKeyVerified,
+           let identity = session.peerIdentityKey?.hex.lowercased() {
             nonceByIdentity[identity, default: []].insert(session.sessionNonce)
         }
     }
