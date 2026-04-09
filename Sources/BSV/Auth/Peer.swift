@@ -309,66 +309,82 @@ public actor Peer {
     }
 
     private func processInitialResponse(_ message: AuthMessage) async throws {
-        guard let yourNonce = message.yourNonce else {
-            throw AuthError.malformedMessage("initialResponse missing yourNonce")
-        }
-        let nonceValid = try await AuthNonce.verify(yourNonce, wallet: wallet)
-        if !nonceValid {
-            throw AuthError.invalidNonce
-        }
-
-        guard var session = sessionManager.getSession(yourNonce) else {
-            throw AuthError.sessionNotFound("no session for nonce \(yourNonce)")
-        }
-
-        guard let peerInitial = message.initialNonce, let signature = message.signature else {
-            throw AuthError.malformedMessage("initialResponse missing initialNonce or signature")
-        }
-
-        let dataToVerify = decodedNonce(session.sessionNonce) + decodedNonce(peerInitial)
-        let verifyResult: Bool
+        // Track the session nonce we've matched the message to, so any
+        // throw below can unblock the handshake waiter instead of
+        // leaving `initiateHandshake` suspended on a continuation that
+        // will never be resumed. Without this, a malformed initialResponse
+        // (bad nonce, missing fields, bad signature, ...) causes the
+        // caller to hang forever.
+        var matchedSessionNonce: String?
         do {
-            verifyResult = try await wallet.verifySignature(args: VerifySignatureArgs(
-                encryption: WalletEncryptionArgs(
-                    protocolID: Peer.signatureProtocol,
-                    keyID: "\(session.sessionNonce) \(peerInitial)",
-                    counterparty: .publicKey(message.identityKey)
-                ),
-                signature: signature,
-                data: dataToVerify
-            )).valid
-        } catch WalletError.invalidSignature {
-            throw AuthError.invalidSignature
-        }
-        if !verifyResult {
-            throw AuthError.invalidSignature
-        }
-
-        session.peerNonce = peerInitial
-        session.peerIdentityKey = message.identityKey
-        // On the initiator path we have just verified the peer's
-        // signature over the session-nonce pair, which proves control of
-        // `message.identityKey`. Mark the identity as verified so
-        // `SessionManager` indexes the session for identity-key lookup.
-        session.peerIdentityKeyVerified = true
-        session.isAuthenticated = true
-        session.certificatesRequired = !certificatesToRequest.certifiers.isEmpty
-        session.certificatesValidated = !session.certificatesRequired
-        session.lastUpdate = Date()
-        sessionManager.updateSession(session)
-
-        lastInteractedPeer = message.identityKey
-
-        // Release the handshake waiter.
-        if let waiter = initialResponseWaiters.removeValue(forKey: session.sessionNonce) {
-            waiter.resume(returning: ())
-        }
-
-        // Honour any cert request the peer tacked onto the response.
-        if let requested = message.requestedCertificates, !requested.isEmpty {
-            for cb in certificatesRequestedListeners.values {
-                cb(message.identityKey, requested)
+            guard let yourNonce = message.yourNonce else {
+                throw AuthError.malformedMessage("initialResponse missing yourNonce")
             }
+            let nonceValid = try await AuthNonce.verify(yourNonce, wallet: wallet)
+            if !nonceValid {
+                throw AuthError.invalidNonce
+            }
+
+            guard var session = sessionManager.getSession(yourNonce) else {
+                throw AuthError.sessionNotFound("no session for nonce \(yourNonce)")
+            }
+            // From here on, any throw must wake the matching waiter.
+            matchedSessionNonce = session.sessionNonce
+
+            guard let peerInitial = message.initialNonce, let signature = message.signature else {
+                throw AuthError.malformedMessage("initialResponse missing initialNonce or signature")
+            }
+
+            let dataToVerify = decodedNonce(session.sessionNonce) + decodedNonce(peerInitial)
+            let verifyResult: Bool
+            do {
+                verifyResult = try await wallet.verifySignature(args: VerifySignatureArgs(
+                    encryption: WalletEncryptionArgs(
+                        protocolID: Peer.signatureProtocol,
+                        keyID: "\(session.sessionNonce) \(peerInitial)",
+                        counterparty: .publicKey(message.identityKey)
+                    ),
+                    signature: signature,
+                    data: dataToVerify
+                )).valid
+            } catch WalletError.invalidSignature {
+                throw AuthError.invalidSignature
+            }
+            if !verifyResult {
+                throw AuthError.invalidSignature
+            }
+
+            session.peerNonce = peerInitial
+            session.peerIdentityKey = message.identityKey
+            // On the initiator path we have just verified the peer's
+            // signature over the session-nonce pair, which proves control of
+            // `message.identityKey`. Mark the identity as verified so
+            // `SessionManager` indexes the session for identity-key lookup.
+            session.peerIdentityKeyVerified = true
+            session.isAuthenticated = true
+            session.certificatesRequired = !certificatesToRequest.certifiers.isEmpty
+            session.certificatesValidated = !session.certificatesRequired
+            session.lastUpdate = Date()
+            sessionManager.updateSession(session)
+
+            lastInteractedPeer = message.identityKey
+
+            // Release the handshake waiter.
+            if let waiter = initialResponseWaiters.removeValue(forKey: session.sessionNonce) {
+                waiter.resume(returning: ())
+            }
+
+            // Honour any cert request the peer tacked onto the response.
+            if let requested = message.requestedCertificates, !requested.isEmpty {
+                for cb in certificatesRequestedListeners.values {
+                    cb(message.identityKey, requested)
+                }
+            }
+        } catch {
+            if let sessionNonce = matchedSessionNonce {
+                failWaiter(sessionNonce: sessionNonce, error: error)
+            }
+            throw error
         }
     }
 

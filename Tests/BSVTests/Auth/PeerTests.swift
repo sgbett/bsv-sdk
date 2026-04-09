@@ -293,6 +293,81 @@ final class PeerTests: XCTestCase {
         withExtendedLifetime(bob) {}
     }
 
+    // MARK: - H1: Handshake continuation leak on malformed initialResponse
+
+    /// A malformed `initialResponse` (e.g. invalid signature) must cause
+    /// `initiateHandshake` to throw rather than hang forever. The waiter
+    /// continuation must be resumed on any failure path inside
+    /// `processInitialResponse`, not only on success.
+    func testMalformedInitialResponseThrowsRatherThanHangs() async throws {
+        let (aliceTransport, peerTransport) = await makeConnectedTransports()
+
+        let aliceWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+        let attackerWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+        let alice = try await Peer(wallet: aliceWallet, transport: aliceTransport)
+
+        let attackerIdentity = try await attackerWallet.getPublicKey(
+            args: GetPublicKeyArgs(identityKey: true)
+        ).publicKey
+
+        // Hook the peer transport so any incoming initialRequest is
+        // answered with a malformed initialResponse: echo Alice's nonce
+        // but sign with a garbage payload so signature verification
+        // fails. processInitialResponse must fail and wake the waiter.
+        try await peerTransport.onData { [peerTransport, attackerWallet, attackerIdentity] message in
+            guard message.messageType == .initialRequest,
+                  let aliceNonce = message.initialNonce else { return }
+
+            let attackerNonce = try await AuthNonce.create(wallet: attackerWallet)
+            // Deliberately sign unrelated data — verification will fail
+            // inside processInitialResponse, which must surface as an
+            // error from getAuthenticatedSession rather than a deadlock.
+            let badSig = try await attackerWallet.createSignature(args: CreateSignatureArgs(
+                encryption: WalletEncryptionArgs(
+                    protocolID: Peer.signatureProtocol,
+                    keyID: "\(aliceNonce) \(attackerNonce)",
+                    counterparty: .publicKey(message.identityKey)
+                ),
+                data: Data("garbage".utf8)
+            )).signature
+
+            let response = AuthMessage(
+                messageType: .initialResponse,
+                identityKey: attackerIdentity,
+                initialNonce: attackerNonce,
+                yourNonce: aliceNonce,
+                signature: badSig
+            )
+            try await peerTransport.send(response)
+        }
+
+        // Race the handshake against a watchdog. If the fix is missing,
+        // getAuthenticatedSession hangs forever and the watchdog wins,
+        // causing the test to fail rather than hanging the suite.
+        enum Outcome: Sendable { case threw, succeeded, timedOut }
+        let outcome: Outcome = await withTaskGroup(of: Outcome.self) { group in
+            group.addTask {
+                do {
+                    _ = try await alice.getAuthenticatedSession(identityKey: attackerIdentity)
+                    return .succeeded
+                } catch {
+                    return .threw
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return .timedOut
+            }
+            let first = await group.next() ?? .timedOut
+            group.cancelAll()
+            return first
+        }
+        XCTAssertEqual(
+            outcome, .threw,
+            "malformed initialResponse must cause initiateHandshake to throw, not hang or succeed"
+        )
+    }
+
     // MARK: - Vuln 2: Unsigned initialRequest session injection
 
     /// An attacker-controlled peer sends Alice an unsigned BRC-66
