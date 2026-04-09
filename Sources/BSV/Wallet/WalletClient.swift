@@ -118,12 +118,14 @@ public struct WalletClient: WalletInterface {
     public func revealCounterpartyKeyLinkage(
         args: RevealCounterpartyKeyLinkageArgs
     ) async throws -> RevealCounterpartyKeyLinkageResult {
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "counterparty": args.counterparty.hex,
             "verifier": args.verifier.hex,
-            "privileged": args.privileged,
-            "privilegedReason": args.privilegedReason as Any
+            "privileged": args.privileged
         ]
+        if let reason = args.privilegedReason {
+            payload["privilegedReason"] = reason
+        }
         let response = try await call("revealCounterpartyKeyLinkage", payload: payload)
         guard
             let proverHex = response["prover"] as? String,
