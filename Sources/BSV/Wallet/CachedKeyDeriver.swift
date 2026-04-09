@@ -5,6 +5,11 @@ import Foundation
 /// Useful when the same `(protocolID, keyID, counterparty)` triple is derived repeatedly,
 /// since BRC-42 derivation is dominated by an ECDH scalar multiplication.
 ///
+/// The cache is implemented as a dictionary plus a doubly-linked list, so
+/// every get / set / eviction is O(1). The previous implementation used an
+/// `Array<(String, CachedValue)>` with `firstIndex(where:) + remove + append`
+/// which degraded to O(n) on every call at the default `maxCacheSize = 1000`.
+///
 /// This class is thread-safe via a single internal lock.
 public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
     public let rootKey: PrivateKey
@@ -13,8 +18,23 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
     private let inner: KeyDeriver
     private let maxCacheSize: Int
     private let lock = NSLock()
-    // An ordered dictionary implemented as an Array<(key, value)> — newest at the end.
-    private var entries: [(String, CachedValue)] = []
+
+    // O(1) LRU: a dictionary maps keys to nodes, and a doubly-linked list
+    // tracks access order with head = least-recently-used, tail = most-recent.
+    private final class Node {
+        let key: String
+        var value: CachedValue
+        var prev: Node?
+        var next: Node?
+
+        init(key: String, value: CachedValue) {
+            self.key = key
+            self.value = value
+        }
+    }
+    private var lookup: [String: Node] = [:]
+    private var head: Node?   // least-recently-used
+    private var tail: Node?   // most-recently-used
 
     private enum CachedValue {
         case publicKey(PublicKey)
@@ -38,8 +58,11 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
         counterparty: WalletCounterparty,
         forSelf: Bool = false
     ) throws -> PublicKey {
-        let cacheKey = cacheKey("derivePublicKey", protocolID, keyID, counterparty, forSelf)
-        if case .publicKey(let cached) = get(cacheKey) {
+        let key = "derivePublicKey|" + encodeProtocol(protocolID)
+            + "|" + keyID
+            + "|" + encodeCounterparty(counterparty)
+            + "|" + (forSelf ? "1" : "0")
+        if case .publicKey(let cached) = get(key) {
             return cached
         }
         let result = try inner.derivePublicKey(
@@ -48,7 +71,7 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
             counterparty: counterparty,
             forSelf: forSelf
         )
-        set(cacheKey, .publicKey(result))
+        set(key, .publicKey(result))
         return result
     }
 
@@ -57,8 +80,10 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
         keyID: String,
         counterparty: WalletCounterparty
     ) throws -> PrivateKey {
-        let cacheKey = cacheKey("derivePrivateKey", protocolID, keyID, counterparty)
-        if case .privateKey(let cached) = get(cacheKey) {
+        let key = "derivePrivateKey|" + encodeProtocol(protocolID)
+            + "|" + keyID
+            + "|" + encodeCounterparty(counterparty)
+        if case .privateKey(let cached) = get(key) {
             return cached
         }
         let result = try inner.derivePrivateKey(
@@ -66,7 +91,7 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
             keyID: keyID,
             counterparty: counterparty
         )
-        set(cacheKey, .privateKey(result))
+        set(key, .privateKey(result))
         return result
     }
 
@@ -75,8 +100,10 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
         keyID: String,
         counterparty: WalletCounterparty
     ) throws -> SymmetricKey {
-        let cacheKey = cacheKey("deriveSymmetricKey", protocolID, keyID, counterparty)
-        if case .symmetricKey(let cached) = get(cacheKey) {
+        let key = "deriveSymmetricKey|" + encodeProtocol(protocolID)
+            + "|" + keyID
+            + "|" + encodeCounterparty(counterparty)
+        if case .symmetricKey(let cached) = get(key) {
             return cached
         }
         let result = try inner.deriveSymmetricKey(
@@ -84,17 +111,17 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
             keyID: keyID,
             counterparty: counterparty
         )
-        set(cacheKey, .symmetricKey(result))
+        set(key, .symmetricKey(result))
         return result
     }
 
     public func revealCounterpartySecret(counterparty: WalletCounterparty) throws -> Data {
-        let cacheKey = cacheKey("revealCounterpartySecret", counterparty)
-        if case .data(let cached) = get(cacheKey) {
+        let key = "revealCounterpartySecret|" + encodeCounterparty(counterparty)
+        if case .data(let cached) = get(key) {
             return cached
         }
         let result = try inner.revealCounterpartySecret(counterparty: counterparty)
-        set(cacheKey, .data(result))
+        set(key, .data(result))
         return result
     }
 
@@ -103,8 +130,10 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
         protocolID: WalletProtocol,
         keyID: String
     ) throws -> Data {
-        let cacheKey = cacheKey("revealSpecificSecret", counterparty, protocolID, keyID)
-        if case .data(let cached) = get(cacheKey) {
+        let key = "revealSpecificSecret|" + encodeCounterparty(counterparty)
+            + "|" + encodeProtocol(protocolID)
+            + "|" + keyID
+        if case .data(let cached) = get(key) {
             return cached
         }
         let result = try inner.revealSpecificSecret(
@@ -112,7 +141,7 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
             protocolID: protocolID,
             keyID: keyID
         )
-        set(cacheKey, .data(result))
+        set(key, .data(result))
         return result
     }
 
@@ -121,56 +150,71 @@ public final class CachedKeyDeriver: KeyDeriverAPI, @unchecked Sendable {
     private func get(_ key: String) -> CachedValue? {
         lock.lock()
         defer { lock.unlock() }
-        if let index = entries.firstIndex(where: { $0.0 == key }) {
-            let entry = entries.remove(at: index)
-            entries.append(entry)
-            return entry.1
-        }
-        return nil
+        guard let node = lookup[key] else { return nil }
+        moveToTail(node)
+        return node.value
     }
 
     private func set(_ key: String, _ value: CachedValue) {
         lock.lock()
         defer { lock.unlock() }
-        if let index = entries.firstIndex(where: { $0.0 == key }) {
-            entries.remove(at: index)
+        if let node = lookup[key] {
+            node.value = value
+            moveToTail(node)
+            return
         }
-        entries.append((key, value))
-        while entries.count > maxCacheSize {
-            entries.removeFirst()
+        let node = Node(key: key, value: value)
+        lookup[key] = node
+        appendToTail(node)
+        if lookup.count > maxCacheSize, let victim = head {
+            removeNode(victim)
+            lookup.removeValue(forKey: victim.key)
         }
+    }
+
+    // MARK: - Linked-list helpers (O(1))
+
+    private func appendToTail(_ node: Node) {
+        node.prev = tail
+        node.next = nil
+        tail?.next = node
+        tail = node
+        if head == nil { head = node }
+    }
+
+    private func removeNode(_ node: Node) {
+        let prev = node.prev
+        let next = node.next
+        prev?.next = next
+        next?.prev = prev
+        if head === node { head = next }
+        if tail === node { tail = prev }
+        node.prev = nil
+        node.next = nil
+    }
+
+    private func moveToTail(_ node: Node) {
+        if tail === node { return }
+        removeNode(node)
+        appendToTail(node)
     }
 
     // MARK: - Key serialisation
 
-    private func cacheKey(_ method: String, _ args: Any...) -> String {
-        var parts: [String] = [method]
-        for arg in args {
-            parts.append(serialise(arg))
-        }
-        return parts.joined(separator: "|")
+    /// All cache-key inputs come from a fixed set of strongly typed values,
+    /// so encoding is exhaustive by construction — no `String(describing:)`
+    /// fallback, which previously risked silently aliasing distinct values
+    /// that happen to stringify identically.
+
+    private func encodeProtocol(_ proto: WalletProtocol) -> String {
+        "\(proto.securityLevel.rawValue):\(proto.protocol)"
     }
 
-    private func serialise(_ value: Any) -> String {
-        switch value {
-        case let pk as PublicKey:
-            return pk.hex
-        case let sk as PrivateKey:
-            return sk.hex
-        case let proto as WalletProtocol:
-            return "\(proto.securityLevel.rawValue):\(proto.protocol)"
-        case let cp as WalletCounterparty:
-            switch cp {
-            case .`self`: return "self"
-            case .anyone: return "anyone"
-            case .publicKey(let pk): return "pk:\(pk.hex)"
-            }
-        case let b as Bool:
-            return b ? "true" : "false"
-        case let s as String:
-            return s
-        default:
-            return String(describing: value)
+    private func encodeCounterparty(_ cp: WalletCounterparty) -> String {
+        switch cp {
+        case .`self`: return "self"
+        case .anyone: return "anyone"
+        case .publicKey(let pk): return "pk:\(pk.hex)"
         }
     }
 }
