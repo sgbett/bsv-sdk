@@ -208,16 +208,3 @@ public struct ProtoWallet: WalletInterface {
         )
     }
 }
-
-/// Byte helpers.
-enum ConstantTime {
-    /// Constant-time comparison of two byte buffers.
-    static func equal(_ a: Data, _ b: Data) -> Bool {
-        guard a.count == b.count else { return false }
-        var diff: UInt8 = 0
-        for i in 0..<a.count {
-            diff |= a[a.startIndex + i] ^ b[b.startIndex + i]
-        }
-        return diff == 0
-    }
-}

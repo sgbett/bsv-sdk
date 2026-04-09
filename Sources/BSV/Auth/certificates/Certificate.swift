@@ -180,36 +180,3 @@ public struct Certificate: Sendable, Equatable {
         }
     }
 }
-
-// MARK: - Small internal byte reader
-
-/// Minimal cursor-based reader used by certificate parsing. Lives here to
-/// keep Certificate self-contained; the wider SDK already has its own
-/// transaction reader, but that one is geared at big-integer bitcoin varints.
-struct ByteReader {
-    private let buffer: Data
-    private var cursor: Int
-
-    init(_ buffer: Data) {
-        self.buffer = buffer
-        self.cursor = 0
-    }
-
-    mutating func read(_ count: Int) -> Data? {
-        guard count >= 0, cursor + count <= buffer.count else { return nil }
-        let slice = buffer.subdata(in: (buffer.startIndex + cursor)..<(buffer.startIndex + cursor + count))
-        cursor += count
-        return slice
-    }
-
-    mutating func readVarInt() -> UInt64? {
-        guard let decoded = VarInt.decode(buffer, offset: cursor) else { return nil }
-        cursor += decoded.bytesRead
-        return decoded.value
-    }
-
-    func remaining() -> Data {
-        guard cursor < buffer.count else { return Data() }
-        return buffer.subdata(in: (buffer.startIndex + cursor)..<buffer.endIndex)
-    }
-}
