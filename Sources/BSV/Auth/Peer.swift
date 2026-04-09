@@ -417,8 +417,10 @@ public actor Peer {
             throw AuthError.malformedMessage("certificateRequest missing fields")
         }
 
-        // The signed data is the UTF-8 JSON of the requestedCertificates.
-        let jsonData = try JSONEncoder().encode(requested)
+        // The signed data is the canonical JSON of the requestedCertificates.
+        // See `CanonicalJSON.encodeRequestedCertificateSet` — both ends of
+        // the wire must agree on byte-for-byte identical pre-images.
+        let jsonData = try CanonicalJSON.encodeRequestedCertificateSet(requested)
         let valid = (try? await wallet.verifySignature(args: VerifySignatureArgs(
             encryption: WalletEncryptionArgs(
                 protocolID: Peer.signatureProtocol,
@@ -470,10 +472,10 @@ public actor Peer {
 
         // The signed data is the UTF-8 encoded JSON array of certificates.
         // Key ordering must be deterministic so both sides recompute the
-        // same pre-image — Swift's default JSONEncoder does not guarantee
-        // this, so we use `.sortedKeys`.
+        // same pre-image — see `CanonicalJSON.encodeCertificates` for the
+        // ts-sdk insertion-order layout.
         let certs = message.certificates ?? []
-        let jsonData = try Self.canonicalCertJSON(certs)
+        let jsonData = CanonicalJSON.encodeCertificates(certs)
         let valid = (try? await wallet.verifySignature(args: VerifySignatureArgs(
             encryption: WalletEncryptionArgs(
                 protocolID: Peer.signatureProtocol,
@@ -598,16 +600,6 @@ public actor Peer {
 
     // MARK: - Helpers
 
-    /// Canonicalise the JSON pre-image used for certificate-response
-    /// signing. Swift's default `JSONEncoder` does not guarantee key
-    /// ordering for `[String: String]` dictionaries or for arbitrary
-    /// structs, so both sides MUST sort keys to agree on the pre-image.
-    internal static func canonicalCertJSON(_ certs: [Certificate]) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(certs.map { CertificateJSON(from: $0) })
-    }
-
     private func getIdentityKey() async throws -> PublicKey {
         if let identityKey { return identityKey }
         let result = try await wallet.getPublicKey(args: GetPublicKeyArgs(identityKey: true))
@@ -631,27 +623,3 @@ public actor Peer {
     }
 }
 
-// MARK: - JSON encoding helpers
-
-/// Thin wrapper used to give `Certificate` a deterministic JSON shape for
-/// signing. Matches the ts-sdk JSON representation used in
-/// `certificateRequest` / `certificateResponse`.
-internal struct CertificateJSON: Codable {
-    let type: String
-    let serialNumber: String
-    let subject: String
-    let certifier: String
-    let revocationOutpoint: String
-    let fields: [String: String]
-    let signature: String?
-
-    init(from cert: Certificate) {
-        self.type = cert.type.base64EncodedString()
-        self.serialNumber = cert.serialNumber.base64EncodedString()
-        self.subject = cert.subject.hex
-        self.certifier = cert.certifier.hex
-        self.revocationOutpoint = cert.revocationOutpoint
-        self.fields = cert.fields
-        self.signature = cert.signature?.hex
-    }
-}

@@ -534,7 +534,7 @@ private struct CertResponseFixture {
         // Mint a nonce for Bob-side and sign the JSON payload the way
         // processCertificateResponse expects.
         let bobNonce = try await AuthNonce.create(wallet: bobWallet)
-        let jsonData = try Peer.canonicalCertJSON(certs)
+        let jsonData = CanonicalJSON.encodeCertificates(certs)
 
         let aliceIdentity = try await aliceWallet.getPublicKey(
             args: GetPublicKeyArgs(identityKey: true)
