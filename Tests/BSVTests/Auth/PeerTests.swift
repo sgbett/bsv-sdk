@@ -215,6 +215,84 @@ final class PeerTests: XCTestCase {
         withExtendedLifetime(fixture.bob) {}
     }
 
+    // MARK: - Vuln 3: General message identity spoofing
+
+    /// A general message whose `identityKey` does not match the session's
+    /// stored `peerIdentityKey` must be rejected, even if the inner
+    /// signature is cryptographically valid against the claimed key.
+    /// BRC-43 verification is ECDH-symmetric, so without this check any
+    /// third party could forge messages into an existing session by
+    /// signing with their own root key.
+    func testGeneralMessageRejectsMismatchedIdentity() async throws {
+        let (aliceTransport, bobTransport) = await makeConnectedTransports()
+
+        let aliceWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+        let bobWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+        let charlieWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+
+        let alice = try await Peer(wallet: aliceWallet, transport: aliceTransport)
+        let bob = try await Peer(wallet: bobWallet, transport: bobTransport)
+
+        let bobIdentity = try await bobWallet.getPublicKey(
+            args: GetPublicKeyArgs(identityKey: true)
+        ).publicKey
+        let aliceIdentity = try await aliceWallet.getPublicKey(
+            args: GetPublicKeyArgs(identityKey: true)
+        ).publicKey
+        let charlieIdentity = try await charlieWallet.getPublicKey(
+            args: GetPublicKeyArgs(identityKey: true)
+        ).publicKey
+
+        // Establish a legitimate Alice-Bob session via the standard
+        // handshake. Alice's session now has peerIdentityKey = Bob.
+        _ = try await alice.getAuthenticatedSession(identityKey: bobIdentity)
+
+        // Collect whatever Alice's general-message listener delivers so we
+        // can assert the forged message never makes it through.
+        let received = MessageCollector()
+        await alice.listenForGeneralMessages { identity, payload in
+            Task { await received.append(identity: identity, payload: payload) }
+        }
+
+        // Charlie crafts a general message claiming identityKey = Charlie,
+        // targeted at Alice's session nonce. He signs with his own root
+        // key under counterparty = Alice — a signature that would pass
+        // verification if Alice naively verified with
+        // counterparty = message.identityKey.
+        let aliceSessionLookup = await alice.sessionManager.getSession(bobIdentity.hex)
+        let aliceSession = try XCTUnwrap(aliceSessionLookup)
+        let charlieNonce = try await AuthNonce.create(wallet: charlieWallet)
+        let payload = Data("spoofed".utf8)
+        let charlieSig = try await charlieWallet.createSignature(args: CreateSignatureArgs(
+            encryption: WalletEncryptionArgs(
+                protocolID: Peer.signatureProtocol,
+                keyID: "\(charlieNonce) \(aliceSession.sessionNonce)",
+                counterparty: .publicKey(aliceIdentity)
+            ),
+            data: payload
+        )).signature
+
+        let spoofed = AuthMessage(
+            messageType: .general,
+            identityKey: charlieIdentity,
+            nonce: charlieNonce,
+            yourNonce: aliceSession.sessionNonce,
+            payload: payload,
+            signature: charlieSig
+        )
+
+        // Deliver via Bob's transport so Alice's onData processes it.
+        try await bobTransport.send(spoofed)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let delivered = await received.all()
+        XCTAssertEqual(
+            delivered.count, 0,
+            "spoofed general message with mismatched identity must not be delivered"
+        )
+        withExtendedLifetime(bob) {}
+    }
+
     // MARK: - Vuln 2: Unsigned initialRequest session injection
 
     /// An attacker-controlled peer sends Alice an unsigned BRC-66

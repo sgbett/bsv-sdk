@@ -379,8 +379,20 @@ public actor Peer {
         let nonceValid = try await AuthNonce.verify(yourNonce, wallet: wallet)
         if !nonceValid { throw AuthError.invalidNonce }
 
-        guard let session = sessionManager.getSession(yourNonce) else {
+        guard var session = sessionManager.getSession(yourNonce) else {
             throw AuthError.sessionNotFound("no session for nonce \(yourNonce)")
+        }
+
+        // Bind the signed message to the identity the session was
+        // established with. BRC-43 signature verification is
+        // ECDH-symmetric, so a peer who signed with counterparty=V using
+        // their own root key could otherwise pass verification regardless
+        // of what `message.identityKey` claims. We must therefore compare
+        // the claimed identity against the stored session identity AND
+        // verify using the stored identity rather than the claim.
+        guard let peerIdentityKey = session.peerIdentityKey,
+              message.identityKey == peerIdentityKey else {
+            throw AuthError.invalidSignature
         }
 
         guard let requested = message.requestedCertificates,
@@ -395,12 +407,23 @@ public actor Peer {
             encryption: WalletEncryptionArgs(
                 protocolID: Peer.signatureProtocol,
                 keyID: "\(peerNonce) \(session.sessionNonce)",
-                counterparty: .publicKey(message.identityKey)
+                counterparty: .publicKey(peerIdentityKey)
             ),
             signature: signature,
             data: jsonData
         )).valid) ?? false
         if !valid { throw AuthError.invalidSignature }
+
+        // A valid signed message proves the peer controls the claimed
+        // identity key. If this is the first cryptographic evidence we
+        // have (the responder path seats sessions with
+        // peerIdentityKeyVerified=false), promote the session so it's
+        // reachable via identity-key lookup.
+        if !session.peerIdentityKeyVerified {
+            session.peerIdentityKeyVerified = true
+            session.lastUpdate = Date()
+            sessionManager.updateSession(session)
+        }
 
         for cb in certificatesRequestedListeners.values {
             cb(message.identityKey, requested)
@@ -417,6 +440,14 @@ public actor Peer {
         guard var session = sessionManager.getSession(yourNonce) else {
             throw AuthError.sessionNotFound("no session for nonce \(yourNonce)")
         }
+
+        // Bind the signed envelope to the identity the session was
+        // established with — see the note in processCertificateRequest.
+        guard let peerIdentityKey = session.peerIdentityKey,
+              message.identityKey == peerIdentityKey else {
+            throw AuthError.invalidSignature
+        }
+
         guard let signature = message.signature, let peerNonce = message.nonce else {
             throw AuthError.malformedMessage("certificateResponse missing fields")
         }
@@ -431,12 +462,18 @@ public actor Peer {
             encryption: WalletEncryptionArgs(
                 protocolID: Peer.signatureProtocol,
                 keyID: "\(peerNonce) \(session.sessionNonce)",
-                counterparty: .publicKey(message.identityKey)
+                counterparty: .publicKey(peerIdentityKey)
             ),
             signature: signature,
             data: jsonData
         )).valid) ?? false
         if !valid { throw AuthError.invalidSignature }
+
+        // First valid signed message from the session peer — promote the
+        // session to verified so identity-key lookup can find it.
+        if !session.peerIdentityKeyVerified {
+            session.peerIdentityKeyVerified = true
+        }
 
         if !certs.isEmpty {
             // Verify each certificate individually. Every check uses the same
@@ -496,6 +533,20 @@ public actor Peer {
         guard var session = sessionManager.getSession(yourNonce) else {
             throw AuthError.sessionNotFound("no session for nonce \(yourNonce)")
         }
+
+        // Bind the signed envelope to the identity the session was
+        // established with. BRC-43 signature verification is
+        // ECDH-symmetric, so verifying with the attacker-controlled
+        // `message.identityKey` (a regression from the ts-sdk reference
+        // at Peer.ts:921) would allow any peer to pass verification by
+        // signing the payload with their own root key under
+        // counterparty=V. We must compare the claimed identity to the
+        // stored session identity AND verify using the stored identity.
+        guard let peerIdentityKey = session.peerIdentityKey,
+              message.identityKey == peerIdentityKey else {
+            throw AuthError.invalidSignature
+        }
+
         guard let payload = message.payload,
               let signature = message.signature,
               let peerNonce = message.nonce else {
@@ -506,19 +557,26 @@ public actor Peer {
             encryption: WalletEncryptionArgs(
                 protocolID: Peer.signatureProtocol,
                 keyID: "\(peerNonce) \(session.sessionNonce)",
-                counterparty: .publicKey(message.identityKey)
+                counterparty: .publicKey(peerIdentityKey)
             ),
             signature: signature,
             data: payload
         )).valid) ?? false
         if !valid { throw AuthError.invalidSignature }
 
+        // First valid signed message from the session peer — promote
+        // the session so identity-key lookup can find it. Before this
+        // point (responder path seeded from an unsigned initialRequest)
+        // the claimed identity was untrusted.
+        if !session.peerIdentityKeyVerified {
+            session.peerIdentityKeyVerified = true
+        }
         session.lastUpdate = Date()
         sessionManager.updateSession(session)
-        lastInteractedPeer = message.identityKey
+        lastInteractedPeer = peerIdentityKey
 
         for cb in generalMessageListeners.values {
-            cb(message.identityKey, payload)
+            cb(peerIdentityKey, payload)
         }
     }
 
