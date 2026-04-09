@@ -69,4 +69,82 @@ final class WithDoubleSpendRetryTests: XCTestCase {
             // expected
         }
     }
+
+    /// Build a minimal valid BEEF binary wrapping a single raw transaction
+    /// so the retry helper can parse and rebroadcast it.
+    private func makeCompetingBeef() -> (Data, String) {
+        let tx = Transaction(version: 1, inputs: [], outputs: [], lockTime: 0)
+        let beef = Beef(
+            version: beefV2Version,
+            bumps: [],
+            transactions: [BeefTx(dataFormat: .rawTx, transaction: tx)]
+        )
+        return (beef.toBinary(), tx.txid())
+    }
+
+    /// An actor-backed counter so the retry operation closure, which is
+    /// `@Sendable`, can bump attempt count across retries.
+    private actor AttemptCounter {
+        private(set) var count = 0
+        func increment() -> Int {
+            count += 1
+            return count
+        }
+    }
+
+    func testRetriesAndSucceedsWithCompetingAction() async throws {
+        let (broadcaster, facilitator) = try makeBroadcaster()
+        let (beefBytes, txid) = makeCompetingBeef()
+        let attempts = AttemptCounter()
+
+        let result = try await withDoubleSpendRetry(broadcaster: broadcaster) {
+            let n = await attempts.increment()
+            if n == 1 {
+                throw StubDoubleSpendError(
+                    competingAction: DoubleSpendCompetingAction(
+                        beef: beefBytes,
+                        txid: txid
+                    )
+                )
+            }
+            return "ok"
+        }
+
+        XCTAssertEqual(result, "ok")
+        let attemptCount = await attempts.count
+        XCTAssertEqual(attemptCount, 2, "operation should run twice: once failing, once succeeding")
+        let sendCount = await facilitator.sendCount
+        XCTAssertEqual(sendCount, 1, "competing tx should be broadcast exactly once between attempts")
+    }
+
+    func testExhaustsMaxRetries() async throws {
+        let (broadcaster, facilitator) = try makeBroadcaster()
+        let (beefBytes, txid) = makeCompetingBeef()
+        let attempts = AttemptCounter()
+
+        do {
+            _ = try await withDoubleSpendRetry(
+                maxRetries: 3,
+                broadcaster: broadcaster
+            ) {
+                _ = await attempts.increment()
+                throw StubDoubleSpendError(
+                    competingAction: DoubleSpendCompetingAction(
+                        beef: beefBytes,
+                        txid: txid
+                    )
+                )
+            }
+            XCTFail("expected StubDoubleSpendError after exhausting retries")
+        } catch is StubDoubleSpendError {
+            // expected
+        }
+
+        let attemptCount = await attempts.count
+        XCTAssertEqual(attemptCount, 3, "operation should be attempted exactly maxRetries times")
+        // The final attempt short-circuits without broadcasting the competing
+        // tx (the retry loop only rebroadcasts when another attempt remains).
+        let sendCount = await facilitator.sendCount
+        XCTAssertEqual(sendCount, 2, "competing tx should be broadcast between each retry but not after the last failure")
+    }
 }
