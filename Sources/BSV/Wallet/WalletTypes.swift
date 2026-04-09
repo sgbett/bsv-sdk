@@ -232,6 +232,22 @@ public struct RevealCounterpartyKeyLinkageResult: Sendable, Equatable {
     public let revelationTime: String
     public let encryptedLinkage: Data
     public let encryptedLinkageProof: Data
+
+    public init(
+        prover: PublicKey,
+        verifier: PublicKey,
+        counterparty: PublicKey,
+        revelationTime: String,
+        encryptedLinkage: Data,
+        encryptedLinkageProof: Data
+    ) {
+        self.prover = prover
+        self.verifier = verifier
+        self.counterparty = counterparty
+        self.revelationTime = revelationTime
+        self.encryptedLinkage = encryptedLinkage
+        self.encryptedLinkageProof = encryptedLinkageProof
+    }
 }
 
 public struct RevealSpecificKeyLinkageResult: Sendable, Equatable {
@@ -243,4 +259,24 @@ public struct RevealSpecificKeyLinkageResult: Sendable, Equatable {
     public let encryptedLinkage: Data
     public let encryptedLinkageProof: Data
     public let proofType: UInt8
+
+    public init(
+        prover: PublicKey,
+        verifier: PublicKey,
+        counterparty: WalletCounterparty,
+        protocolID: WalletProtocol,
+        keyID: String,
+        encryptedLinkage: Data,
+        encryptedLinkageProof: Data,
+        proofType: UInt8
+    ) {
+        self.prover = prover
+        self.verifier = verifier
+        self.counterparty = counterparty
+        self.protocolID = protocolID
+        self.keyID = keyID
+        self.encryptedLinkage = encryptedLinkage
+        self.encryptedLinkageProof = encryptedLinkageProof
+        self.proofType = proofType
+    }
 }
