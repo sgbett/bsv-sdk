@@ -111,7 +111,21 @@ public struct LookupResolver: Sendable {
         hosts: [String],
         question: LookupQuestion
     ) async throws -> [LookupAnswer] {
-        await withTaskGroup(of: LookupAnswer?.self) { group in
+        // The grace-window enum sentinel threads two kinds of events
+        // through a single task group: real lookup answers from each
+        // host, and a single timer task that fires `graceWindow`
+        // seconds after the first answer arrives. The loop below picks
+        // the sentinel out and uses it to cancel the group without
+        // waiting for any remaining slow hosts. The old implementation
+        // only checked elapsed time on the next `for await` iteration,
+        // which meant a fast responder followed by slow hosts stalled
+        // the caller up to `config.timeout`.
+        enum Event: Sendable {
+            case answer(LookupAnswer?)
+            case graceExpired
+        }
+
+        return await withTaskGroup(of: Event.self) { group in
             for host in hosts {
                 group.addTask { [facilitator, config, reputation] in
                     let started = Date()
@@ -123,26 +137,34 @@ public struct LookupResolver: Sendable {
                         )
                         let elapsed = Date().timeIntervalSince(started) * 1000
                         await reputation.recordSuccess(host: host, latencyMs: elapsed)
-                        return answer
+                        return .answer(answer)
                     } catch {
                         await reputation.recordFailure(host: host, immediate: true)
-                        return nil
+                        return .answer(nil)
                     }
                 }
             }
 
             var results: [LookupAnswer] = []
-            var firstArrivedAt: Date?
-            for await maybeAnswer in group {
-                if let answer = maybeAnswer {
-                    results.append(answer)
-                    if firstArrivedAt == nil {
-                        firstArrivedAt = Date()
+            var timerStarted = false
+            let graceNanos = UInt64(max(0, config.graceWindow) * 1_000_000_000)
+
+            while let event = await group.next() {
+                switch event {
+                case .answer(let maybe):
+                    if let answer = maybe {
+                        results.append(answer)
+                        if !timerStarted {
+                            timerStarted = true
+                            group.addTask {
+                                try? await Task.sleep(nanoseconds: graceNanos)
+                                return .graceExpired
+                            }
+                        }
                     }
-                }
-                if let first = firstArrivedAt, Date().timeIntervalSince(first) >= config.graceWindow {
+                case .graceExpired:
                     group.cancelAll()
-                    break
+                    return results
                 }
             }
             return results
