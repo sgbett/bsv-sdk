@@ -96,6 +96,287 @@ final class PeerTests: XCTestCase {
         withExtendedLifetime(bob) {}
     }
 
+    // MARK: - Vuln 1: Certificate verification bypass
+
+    /// A legitimate certificate — properly signed by a certifier that Alice
+    /// trusts, with the correct subject and type — is accepted, and the
+    /// session flag flips to `certificatesValidated = true`.
+    func testCertificateResponseAcceptsValidCertificate() async throws {
+        let fixture = try await CertResponseFixture.make(requireCerts: true)
+        let cert = try await fixture.buildCertificate(
+            subject: fixture.bobIdentity,
+            certifierWallet: fixture.certifierWallet,
+            type: fixture.requestedType
+        )
+        // Sanity check: the cert we built must pass cert.verify() on its own.
+        let directVerify = try await cert.verify()
+        XCTAssertTrue(directVerify, "fixture produced an unverifiable cert")
+
+        try await fixture.sendCertificateResponse([cert])
+        let validated = await fixture.waitForCertificatesValidated()
+        XCTAssertTrue(validated, "valid certificate should flip certificatesValidated")
+        withExtendedLifetime(fixture.bob) {}
+    }
+
+    /// A certificate with no signature must be rejected.
+    func testCertificateResponseRejectsUnsignedCertificate() async throws {
+        let fixture = try await CertResponseFixture.make(requireCerts: true)
+        var cert = try await fixture.buildCertificate(
+            subject: fixture.bobIdentity,
+            certifierWallet: fixture.certifierWallet,
+            type: fixture.requestedType
+        )
+        cert.signature = nil
+
+        try await fixture.sendCertificateResponse([cert])
+
+        let sessionLookup = await fixture.alice.sessionManager.getSession(fixture.bobIdentity.hex)
+        let session = try XCTUnwrap(sessionLookup)
+        XCTAssertFalse(session.certificatesValidated)
+        withExtendedLifetime(fixture.bob) {}
+    }
+
+    /// A certificate signed by a certifier NOT in `certificatesToRequest.certifiers`
+    /// must be rejected.
+    func testCertificateResponseRejectsWrongCertifier() async throws {
+        let fixture = try await CertResponseFixture.make(requireCerts: true)
+        let otherCertifier = ProtoWallet(rootKey: PrivateKey.random()!)
+        let cert = try await fixture.buildCertificate(
+            subject: fixture.bobIdentity,
+            certifierWallet: otherCertifier,
+            type: fixture.requestedType
+        )
+
+        try await fixture.sendCertificateResponse([cert])
+
+        let sessionLookup = await fixture.alice.sessionManager.getSession(fixture.bobIdentity.hex)
+        let session = try XCTUnwrap(sessionLookup)
+        XCTAssertFalse(session.certificatesValidated)
+        withExtendedLifetime(fixture.bob) {}
+    }
+
+    /// A certificate with a type NOT in `certificatesToRequest.types` must
+    /// be rejected.
+    func testCertificateResponseRejectsWrongType() async throws {
+        let fixture = try await CertResponseFixture.make(requireCerts: true)
+        var other = Data(count: 32)
+        _ = other.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
+        }
+        let cert = try await fixture.buildCertificate(
+            subject: fixture.bobIdentity,
+            certifierWallet: fixture.certifierWallet,
+            type: other
+        )
+
+        try await fixture.sendCertificateResponse([cert])
+
+        let sessionLookup = await fixture.alice.sessionManager.getSession(fixture.bobIdentity.hex)
+        let session = try XCTUnwrap(sessionLookup)
+        XCTAssertFalse(session.certificatesValidated)
+        withExtendedLifetime(fixture.bob) {}
+    }
+
+    /// A certificate whose subject does not match the claimed message identity
+    /// must be rejected.
+    func testCertificateResponseRejectsWrongSubject() async throws {
+        let fixture = try await CertResponseFixture.make(requireCerts: true)
+        let strangerSubject = PublicKey.fromPrivateKey(PrivateKey.random()!)
+        let cert = try await fixture.buildCertificate(
+            subject: strangerSubject,
+            certifierWallet: fixture.certifierWallet,
+            type: fixture.requestedType
+        )
+
+        try await fixture.sendCertificateResponse([cert])
+
+        let sessionLookup = await fixture.alice.sessionManager.getSession(fixture.bobIdentity.hex)
+        let session = try XCTUnwrap(sessionLookup)
+        XCTAssertFalse(session.certificatesValidated)
+        withExtendedLifetime(fixture.bob) {}
+    }
+
+    /// A certificate whose signature is complete garbage must be rejected.
+    func testCertificateResponseRejectsForgedSignature() async throws {
+        let fixture = try await CertResponseFixture.make(requireCerts: true)
+        var cert = try await fixture.buildCertificate(
+            subject: fixture.bobIdentity,
+            certifierWallet: fixture.certifierWallet,
+            type: fixture.requestedType
+        )
+        // Replace the signature with random bytes of a plausible DER length.
+        cert.signature = Data(repeating: 0x30, count: 70)
+
+        try await fixture.sendCertificateResponse([cert])
+
+        let sessionLookup = await fixture.alice.sessionManager.getSession(fixture.bobIdentity.hex)
+        let session = try XCTUnwrap(sessionLookup)
+        XCTAssertFalse(session.certificatesValidated)
+        withExtendedLifetime(fixture.bob) {}
+    }
+
+}
+
+// MARK: - Certificate-response test fixture
+
+/// Scaffolding for tests that exercise `processCertificateResponse` without
+/// running a full BRC-66 certificate-response flow. Stands up two real peers
+/// (Alice + Bob) with Alice configured to require certificates from a known
+/// certifier, then exposes a helper to send a hand-signed `certificateResponse`
+/// message from Bob to Alice using the wire protocol.
+private struct CertResponseFixture {
+    let alice: Peer
+    let bob: Peer
+    let aliceWallet: ProtoWallet
+    let bobWallet: ProtoWallet
+    let certifierWallet: ProtoWallet
+    let bobIdentity: PublicKey
+    let certifierIdentity: PublicKey
+    let requestedType: Data
+    let transportB: InMemoryTransport
+
+    /// Build a fixture with an in-memory transport pair, run the BRC-66
+    /// handshake so Alice has an authenticated session with Bob, and return
+    /// the ready-to-use handles.
+    static func make(requireCerts: Bool) async throws -> CertResponseFixture {
+        let (transportA, transportB) = await makeConnectedTransports()
+
+        let aliceWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+        let bobWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+        let certifierWallet = ProtoWallet(rootKey: PrivateKey.random()!)
+
+        let certifierIdentity = try await certifierWallet.getPublicKey(
+            args: GetPublicKeyArgs(identityKey: true)
+        ).publicKey
+
+        // Pin the certificate type so the test can build a matching cert.
+        var typeBytes = Data(count: 32)
+        _ = typeBytes.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
+        }
+
+        let requested: RequestedCertificateSet
+        if requireCerts {
+            requested = RequestedCertificateSet(
+                certifiers: [certifierIdentity.hex],
+                types: [typeBytes.base64EncodedString(): ["name"]]
+            )
+        } else {
+            requested = RequestedCertificateSet()
+        }
+
+        let alice = try await Peer(
+            wallet: aliceWallet,
+            transport: transportA,
+            certificatesToRequest: requested
+        )
+        let bob = try await Peer(wallet: bobWallet, transport: transportB)
+
+        let bobIdentity = try await bobWallet.getPublicKey(
+            args: GetPublicKeyArgs(identityKey: true)
+        ).publicKey
+
+        // Run the BRC-66 handshake to completion. Alice's
+        // `getAuthenticatedSession` does not block on certificate
+        // validation (only `toPeer` does), so it returns once the
+        // handshake itself is authenticated. At that point Alice's session
+        // has `certificatesValidated = false` which is exactly the
+        // pre-condition the tests want before exercising
+        // processCertificateResponse.
+        _ = try await alice.getAuthenticatedSession(identityKey: bobIdentity)
+
+        return CertResponseFixture(
+            alice: alice,
+            bob: bob,
+            aliceWallet: aliceWallet,
+            bobWallet: bobWallet,
+            certifierWallet: certifierWallet,
+            bobIdentity: bobIdentity,
+            certifierIdentity: certifierIdentity,
+            requestedType: typeBytes,
+            transportB: transportB
+        )
+    }
+
+    /// Build a signed BRC-103 certificate with a pinned type.
+    func buildCertificate(
+        subject: PublicKey,
+        certifierWallet: WalletInterface,
+        type: Data
+    ) async throws -> Certificate {
+        var serial = Data(count: 32)
+        _ = serial.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
+        }
+        let certifierID = try await certifierWallet.getPublicKey(
+            args: GetPublicKeyArgs(identityKey: true)
+        ).publicKey
+        var cert = Certificate(
+            type: type,
+            serialNumber: serial,
+            subject: subject,
+            certifier: certifierID,
+            revocationOutpoint: String(repeating: "0", count: 64) + ".0",
+            fields: ["name": "Bob"],
+            signature: nil
+        )
+        try await cert.sign(certifierWallet: certifierWallet)
+        return cert
+    }
+
+    /// Construct a properly-signed outer `certificateResponse` envelope and
+    /// deliver it to Alice via Bob's transport. The outer signature is
+    /// correct — what the tests exercise is the inner certificate
+    /// verification.
+    func sendCertificateResponse(_ certs: [Certificate]) async throws {
+        // Fetch Alice's view of the session so we can address the response
+        // with the nonce Alice minted.
+        guard let session = await alice.sessionManager.getSession(bobIdentity.hex) else {
+            throw AuthError.sessionNotFound("alice has no session for bob")
+        }
+        let aliceSessionNonce = session.sessionNonce
+
+        // Mint a nonce for Bob-side and sign the JSON payload the way
+        // processCertificateResponse expects.
+        let bobNonce = try await AuthNonce.create(wallet: bobWallet)
+        let jsonData = try Peer.canonicalCertJSON(certs)
+
+        let aliceIdentity = try await aliceWallet.getPublicKey(
+            args: GetPublicKeyArgs(identityKey: true)
+        ).publicKey
+
+        let signature = try await bobWallet.createSignature(args: CreateSignatureArgs(
+            encryption: WalletEncryptionArgs(
+                protocolID: Peer.signatureProtocol,
+                keyID: "\(bobNonce) \(aliceSessionNonce)",
+                counterparty: .publicKey(aliceIdentity)
+            ),
+            data: jsonData
+        )).signature
+
+        let response = AuthMessage(
+            messageType: .certificateResponse,
+            identityKey: bobIdentity,
+            nonce: bobNonce,
+            yourNonce: aliceSessionNonce,
+            certificates: certs,
+            signature: signature
+        )
+
+        try await transportB.send(response)
+    }
+
+    /// Spin-wait on Alice's session until `certificatesValidated` flips
+    /// to true, or a bounded timeout elapses. Returns the final value.
+    func waitForCertificatesValidated() async -> Bool {
+        for _ in 0..<50 {
+            let s = await alice.sessionManager.getSession(bobIdentity.hex)
+            if s?.certificatesValidated == true { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let final = await alice.sessionManager.getSession(bobIdentity.hex)
+        return final?.certificatesValidated ?? false
+    }
 }
 
 // MARK: - Helpers

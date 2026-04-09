@@ -402,8 +402,11 @@ public actor Peer {
         }
 
         // The signed data is the UTF-8 encoded JSON array of certificates.
+        // Key ordering must be deterministic so both sides recompute the
+        // same pre-image — Swift's default JSONEncoder does not guarantee
+        // this, so we use `.sortedKeys`.
         let certs = message.certificates ?? []
-        let jsonData = try JSONEncoder().encode(certs.map { CertificateJSON(from: $0) })
+        let jsonData = try Self.canonicalCertJSON(certs)
         let valid = (try? await wallet.verifySignature(args: VerifySignatureArgs(
             encryption: WalletEncryptionArgs(
                 protocolID: Peer.signatureProtocol,
@@ -416,6 +419,42 @@ public actor Peer {
         if !valid { throw AuthError.invalidSignature }
 
         if !certs.isEmpty {
+            // Verify each certificate individually. Every check uses the same
+            // generic error message so a malicious peer cannot use the failure
+            // reason as an oracle to learn which field tripped the check.
+            let genericError = AuthError.certificateInvalid("certificate validation failed")
+            let requested = certificatesToRequest
+            let requestedHasCertifiers = !requested.certifiers.isEmpty
+
+            for cert in certs {
+                // Subject must match the claimed peer identity.
+                if cert.subject != message.identityKey {
+                    throw genericError
+                }
+
+                // Signature must verify against the certifier.
+                let certValid: Bool
+                do {
+                    certValid = try await cert.verify()
+                } catch {
+                    throw genericError
+                }
+                if !certValid {
+                    throw genericError
+                }
+
+                // If the local peer requested a specific certifier/type set,
+                // the certificate must match it.
+                if requestedHasCertifiers {
+                    if !requested.certifiers.contains(cert.certifier.hex) {
+                        throw genericError
+                    }
+                    if requested.types[cert.type.base64EncodedString()] == nil {
+                        throw genericError
+                    }
+                }
+            }
+
             session.certificatesValidated = true
             session.lastUpdate = Date()
             sessionManager.updateSession(session)
@@ -465,6 +504,16 @@ public actor Peer {
 
     // MARK: - Helpers
 
+    /// Canonicalise the JSON pre-image used for certificate-response
+    /// signing. Swift's default `JSONEncoder` does not guarantee key
+    /// ordering for `[String: String]` dictionaries or for arbitrary
+    /// structs, so both sides MUST sort keys to agree on the pre-image.
+    internal static func canonicalCertJSON(_ certs: [Certificate]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(certs.map { CertificateJSON(from: $0) })
+    }
+
     private func getIdentityKey() async throws -> PublicKey {
         if let identityKey { return identityKey }
         let result = try await wallet.getPublicKey(args: GetPublicKeyArgs(identityKey: true))
@@ -493,7 +542,7 @@ public actor Peer {
 /// Thin wrapper used to give `Certificate` a deterministic JSON shape for
 /// signing. Matches the ts-sdk JSON representation used in
 /// `certificateRequest` / `certificateResponse`.
-private struct CertificateJSON: Codable {
+internal struct CertificateJSON: Codable {
     let type: String
     let serialNumber: String
     let subject: String
