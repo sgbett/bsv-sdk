@@ -77,7 +77,7 @@ public struct KeyDeriver: KeyDeriverAPI {
 
         if forSelf {
             // child = rootKey.deriveChild(counterparty, invoiceNumber).toPublicKey()
-            let childPriv = deriveChildPrivate(
+            let childPriv = try deriveChildPrivate(
                 priv: rootKey,
                 counterpartyPub: normalised,
                 invoiceNumber: invoiceNumber
@@ -85,7 +85,7 @@ public struct KeyDeriver: KeyDeriverAPI {
             return PublicKey.fromPrivateKey(childPriv)
         } else {
             // child = counterparty.deriveChild(rootKey, invoiceNumber)
-            return deriveChildPublic(
+            return try deriveChildPublic(
                 pub: normalised,
                 counterpartyPriv: rootKey,
                 invoiceNumber: invoiceNumber
@@ -100,7 +100,7 @@ public struct KeyDeriver: KeyDeriverAPI {
     ) throws -> PrivateKey {
         let normalised = normaliseCounterparty(counterparty)
         let invoiceNumber = try computeInvoiceNumber(protocolID: protocolID, keyID: keyID)
-        return deriveChildPrivate(
+        return try deriveChildPrivate(
             priv: rootKey,
             counterpartyPub: normalised,
             invoiceNumber: invoiceNumber
@@ -157,8 +157,8 @@ public struct KeyDeriver: KeyDeriverAPI {
 
         // Double-check to ensure not revealing the secret for self.
         let selfPub = PublicKey.fromPrivateKey(rootKey)
-        let selfDerived = deriveChildPrivate(priv: rootKey, counterpartyPub: selfPub, invoiceNumber: "test")
-        let counterpartyDerived = deriveChildPrivate(priv: rootKey, counterpartyPub: normalised, invoiceNumber: "test")
+        let selfDerived = try deriveChildPrivate(priv: rootKey, counterpartyPub: selfPub, invoiceNumber: "test")
+        let counterpartyDerived = try deriveChildPrivate(priv: rootKey, counterpartyPub: normalised, invoiceNumber: "test")
         guard selfDerived.data != counterpartyDerived.data else {
             throw WalletError.invalidParameter(
                 name: "counterparty",
@@ -190,11 +190,16 @@ public struct KeyDeriver: KeyDeriverAPI {
     /// counterparty's public key, and a UTF-8 invoice number.
     ///
     /// `childPriv = (rootPriv + HMAC-SHA256(invoice, compressed(rootPriv * counterpartyPub))) mod N`
+    ///
+    /// Throws `WalletError.unknown` if the derived scalar is invalid (zero
+    /// or >= curve order). Matches the BIP-32 / ExtendedKey behaviour: the
+    /// previous `?? priv` fallback silently returned the parent key, which
+    /// is a correctness and security bug.
     func deriveChildPrivate(
         priv: PrivateKey,
         counterpartyPub: PublicKey,
         invoiceNumber: String
-    ) -> PrivateKey {
+    ) throws -> PrivateKey {
         // Shared secret = priv * counterpartyPub
         let sharedPoint = counterpartyPub.point.multiplied(by: priv.data)
         let compressed = sharedPoint.compressed()
@@ -203,25 +208,35 @@ public struct KeyDeriver: KeyDeriverAPI {
         let child = scalarAddModN(hmac, priv.data)
         // A BRC-42 derivation can in theory produce the zero scalar; the ts-sdk
         // treats that as an invalid state. Guard against it.
-        return PrivateKey(data: child) ?? priv
+        guard let derived = PrivateKey(data: child) else {
+            throw WalletError.unknown("BRC-42 derivation produced invalid scalar")
+        }
+        return derived
     }
 
     /// Compute the BRC-42 child public key given the counterparty's public key,
     /// the counterparty's private key, and a UTF-8 invoice number.
     ///
     /// `childPub = rootPub + (HMAC-SHA256(invoice, compressed(counterpartyPriv * rootPub))) * G`
+    ///
+    /// Throws `WalletError.unknown` if the resulting point is the identity
+    /// at infinity — the caller must never silently fall back to the parent
+    /// key, which would collapse distinct derivations onto the same output.
     func deriveChildPublic(
         pub: PublicKey,
         counterpartyPriv: PrivateKey,
         invoiceNumber: String
-    ) -> PublicKey {
+    ) throws -> PublicKey {
         let sharedPoint = pub.point.multiplied(by: counterpartyPriv.data)
         let compressed = sharedPoint.compressed()
         let invoiceBytes = invoiceNumber.data(using: .utf8)!
         let hmac = Digest.hmacSha256(data: invoiceBytes, key: compressed)
         let hmacPoint = Secp256k1.G.multiplied(by: hmac)
         let childPoint = pub.point.adding(hmacPoint)
-        return PublicKey(point: childPoint) ?? pub
+        guard let derived = PublicKey(point: childPoint) else {
+            throw WalletError.unknown("BRC-42 derivation produced identity public key")
+        }
+        return derived
     }
 
     // MARK: - Helpers

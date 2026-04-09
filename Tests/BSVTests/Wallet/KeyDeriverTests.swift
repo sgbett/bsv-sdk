@@ -38,7 +38,7 @@ final class KeyDeriverTests: XCTestCase {
             let recipient = PrivateKey(hex: vector.recipientPrivateKey)!
             let sender = PublicKey(hex: vector.senderPublicKey)!
 
-            let derivedPrivate = KeyDeriver(rootKey: recipient).deriveChildPrivate(
+            let derivedPrivate = try KeyDeriver(rootKey: recipient).deriveChildPrivate(
                 priv: recipient,
                 counterpartyPub: sender,
                 invoiceNumber: vector.invoiceNumber
@@ -59,7 +59,7 @@ final class KeyDeriverTests: XCTestCase {
             let sender = PrivateKey(hex: vector.senderPrivateKey)!
             let recipient = PublicKey(hex: vector.recipientPublicKey)!
 
-            let derivedPublic = KeyDeriver(rootKey: sender).deriveChildPublic(
+            let derivedPublic = try KeyDeriver(rootKey: sender).deriveChildPublic(
                 pub: recipient,
                 counterpartyPriv: sender,
                 invoiceNumber: vector.invoiceNumber
